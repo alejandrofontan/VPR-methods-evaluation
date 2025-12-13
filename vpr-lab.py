@@ -35,6 +35,7 @@ def run_vpr(args, rotation_angle):
 
     input_folder = args.database_folder
     output_folder = input_folder + f"_{rotation_angle}"
+    
     if not os.path.exists(output_folder):
         os.makedirs(output_folder)
         if rotation_angle == 0:
@@ -81,25 +82,31 @@ def run_vpr(args, rotation_angle):
     #logger.debug("Calculating similarity matrix")
 
     # Prepare for manual ordering of images for similarity matrix
-    query_path = args.queries_folder.replace('rgb', '')
-    database_path = input_folder.replace('rgb', '')
+    query_path = Path(args.queries_folder).parent
+    database_path = Path(input_folder).parent
+    #print(parent_path)
+    #query_path = args.queries_folder.replace('rgb', '')
+    #database_path = input_folder.replace('rgb', '')
+    print(args.queries_folder)
+    print(query_path)
+    queries_rgb_csv_path = os.path.join(query_path, 'rgb.csv')
+    database_rgb_csv_path = os.path.join(database_path, 'rgb.csv')
+
+    query_df = pd.read_csv(queries_rgb_csv_path)
+    db_df = pd.read_csv(database_rgb_csv_path)
     
-    queries_rgb_txt_path = os.path.join(query_path, 'rgb.txt')
-    database_rgb_txt_path = os.path.join(database_path, 'rgb.txt')
-
-    query_df = pd.read_csv(queries_rgb_txt_path, sep=' ', header=None)
-    db_df = pd.read_csv(database_rgb_txt_path, sep=' ', header=None)
-    db_df[1] = db_df[1].str.replace("rgb/", f"rgb_{rotation_angle}/", regex=False)
-
+    prefix = Path(args.queries_folder).parent.name
+    db_df['path_rgb0'] = db_df['path_rgb0'].str.replace(prefix, f"rgb_0_{rotation_angle}", regex=False)
+    
     q_indices = []
-    for image in query_df[1]:
+    for image in query_df['path_rgb0']:
         filename = os.path.join(query_path, image)
         if filename in test_ds.queries_paths:
             q_idx = test_ds.queries_paths.index(filename)
             q_indices.append(q_idx)
 
     db_indices = []
-    for image in db_df[1]:
+    for image in db_df['path_rgb0']:
         filename = os.path.join(database_path, image)
         if filename in test_ds.database_paths:
             db_idx = test_ds.database_paths.index(filename)
