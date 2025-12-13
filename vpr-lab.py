@@ -84,18 +84,13 @@ def run_vpr(args, rotation_angle):
     # Prepare for manual ordering of images for similarity matrix
     query_path = Path(args.queries_folder).parent
     database_path = Path(input_folder).parent
-    #print(parent_path)
-    #query_path = args.queries_folder.replace('rgb', '')
-    #database_path = input_folder.replace('rgb', '')
-    print(args.queries_folder)
-    print(query_path)
     queries_rgb_csv_path = os.path.join(query_path, 'rgb.csv')
     database_rgb_csv_path = os.path.join(database_path, 'rgb.csv')
 
     query_df = pd.read_csv(queries_rgb_csv_path)
     db_df = pd.read_csv(database_rgb_csv_path)
     
-    prefix = Path(args.queries_folder).parent.name
+    prefix = Path(input_folder).name
     db_df['path_rgb0'] = db_df['path_rgb0'].str.replace(prefix, f"rgb_0_{rotation_angle}", regex=False)
     
     q_indices = []
@@ -113,7 +108,7 @@ def run_vpr(args, rotation_angle):
             db_indices.append(db_idx)
 
     distance_matrix = faiss.pairwise_distances(database_descriptors, queries_descriptors)
-
+    
     distance_matrix_sorted = np.zeros_like(distance_matrix)
     for i, q_idx in enumerate(q_indices):
         for j, db_idx in enumerate(db_indices):
