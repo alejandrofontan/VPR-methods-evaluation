@@ -91,17 +91,17 @@ def run_vpr(args, rotation_angle):
     db_df = pd.read_csv(database_rgb_csv_path)
     
     prefix = Path(input_folder).name
-    db_df['path_rgb0'] = db_df['path_rgb0'].str.replace(prefix, f"rgb_0_{rotation_angle}", regex=False)
+    db_df['path_rgb_0'] = db_df['path_rgb_0'].str.replace(prefix, f"rgb_0_{rotation_angle}", regex=False)
     
     q_indices = []
-    for image in query_df['path_rgb0']:
+    for image in query_df['path_rgb_0']:
         filename = os.path.join(query_path, image)
         if filename in test_ds.queries_paths:
             q_idx = test_ds.queries_paths.index(filename)
             q_indices.append(q_idx)
 
     db_indices = []
-    for image in db_df['path_rgb0']:
+    for image in db_df['path_rgb_0']:
         filename = os.path.join(database_path, image)
         if filename in test_ds.database_paths:
             db_idx = test_ds.database_paths.index(filename)
