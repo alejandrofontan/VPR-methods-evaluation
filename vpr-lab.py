@@ -1,6 +1,7 @@
 
 import parser
 import os
+import yaml
 from pathlib import Path
 import numpy as np
 import pandas as pd
@@ -14,9 +15,16 @@ import vpr_models
 from rotation_functions import rotate_and_save_images
 from test_dataset import TestDataset
 
-def run_vpr(args, rotation_angle):
-    log_dir = args.log_dir
-    os.makedirs(log_dir, exist_ok=True)
+def run_vpr(args, rotation_angle, yaml_data):   
+    input_folder = yaml_data['rgb_folder_db']
+    queries_folder = yaml_data['rgb_folder_q']
+    database_rgb_csv_path = yaml_data['rgb_list_db']
+    queries_rgb_csv_path = yaml_data['rgb_list_q']
+    query_path = Path(queries_folder).parent
+    database_path = Path(input_folder).parent
+
+    log_dir = Path(yaml_data['log_dir'])
+    log_dir.mkdir(exist_ok=True, parents=True)
     
     #logger.remove()  # Remove possibly previously existing loggers
     #log_dir = Path("logs") / args.log_dir # / start_time.strftime("%Y-%m-%d_%H-%M-%S")
@@ -33,7 +41,7 @@ def run_vpr(args, rotation_angle):
     model = vpr_models.get_model(args.method, args.backbone, args.descriptors_dimension)
     model = model.eval().to(args.device)
 
-    input_folder = args.database_folder
+    #input_folder = args.database_folder
     output_folder = input_folder + f"_{rotation_angle}"
     
     if not os.path.exists(output_folder):
@@ -47,7 +55,7 @@ def run_vpr(args, rotation_angle):
 
     test_ds = TestDataset(
         output_folder,
-        args.queries_folder,
+        queries_folder,
         positive_dist_threshold=args.positive_dist_threshold,
         image_size=args.image_size,
         use_labels=args.use_labels,
@@ -81,12 +89,6 @@ def run_vpr(args, rotation_angle):
     # Compute similarity matrix
     #logger.debug("Calculating similarity matrix")
 
-    # Prepare for manual ordering of images for similarity matrix
-    query_path = Path(args.queries_folder).parent
-    database_path = Path(input_folder).parent
-    queries_rgb_csv_path = os.path.join(query_path, 'rgb.csv')
-    database_rgb_csv_path = os.path.join(database_path, 'rgb.csv')
-
     query_df = pd.read_csv(queries_rgb_csv_path)
     db_df = pd.read_csv(database_rgb_csv_path)
     
@@ -114,7 +116,7 @@ def run_vpr(args, rotation_angle):
         for j, db_idx in enumerate(db_indices):
             distance_matrix_sorted[j,i] = distance_matrix[db_idx, q_idx]
 
-    np.save(os.path.join(log_dir, f"D_{rotation_angle}_{args.method}.npy"), distance_matrix_sorted)  # saves binary numpy file
+    np.save(os.path.join(log_dir, f"D_{rotation_angle}.npy"), distance_matrix_sorted)  # saves binary numpy file
 
     if args.verbose:
         import matplotlib.pyplot as plt
@@ -126,10 +128,18 @@ def run_vpr(args, rotation_angle):
         plt.title("Pairwise Distance Matrix")
 
         plt.show()
+    return distance_matrix_sorted
 
 if __name__ == "__main__":
     args = parser.parse_arguments()
-    run_vpr(args, 0)
-    run_vpr(args, 90)
-    run_vpr(args, 180)
-    run_vpr(args, 270)
+
+    exp_yaml = args.exp_yaml
+    with open(exp_yaml, 'r') as stream:
+        yaml_data = yaml.safe_load(stream)
+
+    D_0 = run_vpr(args, 0, yaml_data)
+    D_90 =  run_vpr(args, 90, yaml_data)
+    D_180 = run_vpr(args, 180, yaml_data)
+    D_270 = run_vpr(args, 270, yaml_data)
+    D = np.minimum.reduce([D_0, D_90, D_180, D_270])
+    np.save(os.path.join(yaml_data['log_dir'], f"D.npy"), D)
