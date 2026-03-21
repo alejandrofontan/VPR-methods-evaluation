@@ -50,15 +50,13 @@ def parse_arguments():
     parser.add_argument("--descriptors_dimension", type=int, default=None, help="_")
 
     parser.add_argument("--exp_yaml", type=str, required=True, help="path/to/exp.yaml")
-    
+
     parser.add_argument("-v", "--verbose",  action="store_true", help="Show distance matrix)")
     parser.add_argument("--num_workers", type=int, default=4, help="_")
     parser.add_argument(
         "--batch_size", type=int, default=4, help="set to 1 if database images may have different resolution"
     )
-    # parser.add_argument(
-    #     "--log_dir", type=str, default="default", help="experiment name, output logs will be saved under logs/log_dir"
-    # )
+
     parser.add_argument("--device", type=str, default="cuda", choices=["cuda", "cpu"], help="_")
     parser.add_argument(
         "--recall_values",
@@ -67,12 +65,13 @@ def parse_arguments():
         default=[1, 5, 10, 20],
         help="values for recall (e.g. recall@1, recall@5)",
     )
+
     parser.add_argument(
-        "--no_labels",
+        "--rot_360",
         action="store_true",
-        help="set to true if you have no labels and just want to "
-        "do standard image retrieval given two folders of queries and DB",
+        help="set to true if you want to try four rotations (0, 90, 180, 270) "
     )
+
     parser.add_argument(
         "--num_preds_to_save", type=int, default=0, help="set != 0 if you want to save predictions for each query"
     )
@@ -96,7 +95,7 @@ def parse_arguments():
     )
     args = parser.parse_args()
 
-    args.use_labels = not args.no_labels
+    args.use_labels = False
 
     if args.method == "netvlad":
         if args.backbone not in [None, "VGG16"]:

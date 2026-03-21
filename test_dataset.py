@@ -6,6 +6,7 @@ import torch.utils.data as data
 import torchvision.transforms as transforms
 from PIL import Image
 from sklearn.neighbors import NearestNeighbors
+from torchvision.transforms import functional as F
 
 
 def read_images_paths(dataset_folder):
@@ -48,22 +49,36 @@ def read_images_paths(dataset_folder):
     return images_paths
 
 
+class FixedRotation:
+    """Rotate image by a fixed angle. Only 0, 90, 180, 270 are valid."""
+    VALID_ANGLES = {0, 90, 180, 270}
+
+    def __init__(self, angle):
+        if angle not in self.VALID_ANGLES:
+            raise ValueError(f"rotation must be one of {self.VALID_ANGLES}, got {angle}")
+        self.angle = angle
+
+    def __call__(self, img):
+        if self.angle == 0:
+            return img
+        return F.rotate(img, self.angle)
+
+    def __repr__(self):
+        return f"FixedRotation(angle={self.angle})"
+
 class TestDataset(data.Dataset):
-    def __init__(self, database_folder, queries_folder, positive_dist_threshold=25, image_size=None, use_labels=True):
+    def __init__(self, database_image_list, queries_image_list, rotation=0,
+                 positive_dist_threshold=25, image_size=None, use_labels=True):
         """Dataset with images from database and queries, used for validation and test.
         Parameters
         ----------
-        dataset_folder : str, should contain the path to the val or test set,
-            which contains the folders {database_folder} and {queries_folder}.
-        database_folder : str, name of folder with the database.
-        queries_folder : str, name of folder with the queries.
         positive_dist_threshold : int, distance in meters for a prediction to
             be considered a positive.
         """
         super().__init__()
 
-        self.database_paths = read_images_paths(database_folder)
-        self.queries_paths = read_images_paths(queries_folder)
+        self.database_paths = database_image_list #read_images_paths(database_folder)
+        self.queries_paths = queries_image_list #read_images_paths(queries_folder)
 
         self.images_paths = list(self.database_paths) + list(self.queries_paths)
 
@@ -98,18 +113,21 @@ class TestDataset(data.Dataset):
                 self.queries_utms, radius=positive_dist_threshold, return_distance=False
             )
 
-        transformations = [
+        base_transformations = [
             transforms.ToTensor(),
             transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225]),
         ]
+
         if image_size:
-            transformations.append(transforms.Resize(size=image_size, antialias=True))
-        self.transform = transforms.Compose(transformations)
+            base_transformations.append(transforms.Resize(size=image_size, antialias=True))
+        self.db_transform = transforms.Compose([FixedRotation(rotation)] + base_transformations)
+        self.q_transform = transforms.Compose(base_transformations)
 
     def __getitem__(self, index):
         image_path = self.images_paths[index]
         pil_img = Image.open(image_path).convert("RGB")
-        normalized_img = self.transform(pil_img)
+        transform = self.db_transform if index < self.num_database else self.q_transform
+        normalized_img = transform(pil_img)
         return normalized_img, index
 
     def __len__(self):
