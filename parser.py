@@ -49,7 +49,10 @@ def parse_arguments():
     )
     parser.add_argument("--descriptors_dimension", type=int, default=None, help="_")
 
-    parser.add_argument("--exp_yaml", type=str, required=True, help="path/to/exp.yaml")
+    parser.add_argument("--exp_yaml", type=str, required=False, help="path/to/exp.yaml")
+    parser.add_argument("--rgb_csv_db", type=str, required=False, help="path/to/rgb_list_db.csv")
+    parser.add_argument("--rgb_csv_q", type=str, required=False, help="path/to/rgb_list_q.csv")
+    parser.add_argument("--log_dir", type=str, required=False, help="path/to/log/dir")
 
     parser.add_argument("-v", "--verbose",  action="store_true", help="Show distance matrix)")
     parser.add_argument("--num_workers", type=int, default=4, help="_")

@@ -88,10 +88,18 @@ def run_vpr(args, rotation_angle, yaml_data):
 
 if __name__ == "__main__":
     args = parser.parse_arguments()
-
     exp_yaml = args.exp_yaml
-    with open(exp_yaml, "r") as stream:
-        yaml_data = yaml.safe_load(stream)
+    
+    if os.path.exists(exp_yaml):
+        with open(exp_yaml, "r") as stream:
+            yaml_data = yaml.safe_load(stream)
+    else:
+        yaml_data = {
+            "rgb_list_db": args.rgb_csv_db,
+            "rgb_list_q": args.rgb_csv_q,
+            "log_dir": args.log_dir,
+        }
+    print(f"Running VPR evaluation with method: {args.method}, rotation: {args.rot_360}, and yaml_data: {yaml_data}")
 
     D_0 = run_vpr(args, 0, yaml_data)
     if args.rot_360:
