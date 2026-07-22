@@ -15,6 +15,8 @@ from torch.utils.data import DataLoader
 from torch.utils.data.dataset import Subset
 from tqdm import tqdm
 
+SCRIPT_LABEL = f"\033[95m[{os.path.basename(__file__)}]\033[0m "
+
 
 def run_vpr(args, rotation_angle, yaml_data):
 
@@ -51,7 +53,7 @@ def run_vpr(args, rotation_angle, yaml_data):
             dataset=database_subset_ds, num_workers=args.num_workers, batch_size=args.batch_size
         )
         all_descriptors = np.empty((len(test_ds), args.descriptors_dimension), dtype="float32")
-        for images, indices in tqdm(database_dataloader, desc=f"Extracting descriptors for database images rotated by {rotation_angle} degrees"):
+        for images, indices in tqdm(database_dataloader, desc=f"{SCRIPT_LABEL}Extracting database descriptors (rotation {rotation_angle} deg)"):
             descriptors = model(images.to(args.device))
             descriptors = descriptors.cpu().numpy()
             all_descriptors[indices.numpy(), :] = descriptors
@@ -60,7 +62,7 @@ def run_vpr(args, rotation_angle, yaml_data):
             test_ds, list(range(test_ds.num_database, test_ds.num_database + test_ds.num_queries))
         )
         queries_dataloader = DataLoader(dataset=queries_subset_ds, num_workers=args.num_workers, batch_size=1)
-        for images, indices in tqdm(queries_dataloader, desc=f"Extracting descriptors for queries images rotated by {rotation_angle} degrees"):
+        for images, indices in tqdm(queries_dataloader, desc=f"{SCRIPT_LABEL}Extracting query descriptors (rotation {rotation_angle} deg)"):
             descriptors = model(images.to(args.device))
             descriptors = descriptors.cpu().numpy()
             all_descriptors[indices.numpy(), :] = descriptors
@@ -99,7 +101,12 @@ if __name__ == "__main__":
             "rgb_list_q": args.rgb_csv_q,
             "log_dir": args.log_dir,
         }
-    print(f"Running VPR evaluation with method: {args.method}, rotation: {args.rot_360}, and yaml_data: {yaml_data}")
+    print(f"\n{SCRIPT_LABEL}Running VPR evaluation")
+    print(f"    - Method:   {args.method}")
+    print(f"    - Rotation: {args.rot_360}")
+    print(f"    - Database: {yaml_data['rgb_list_db']}")
+    print(f"    - Queries:  {yaml_data['rgb_list_q']}")
+    print(f"    - Log dir:  {yaml_data['log_dir']}")
 
     D_0 = run_vpr(args, 0, yaml_data)
     if args.rot_360:

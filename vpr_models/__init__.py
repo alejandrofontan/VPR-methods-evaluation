@@ -54,7 +54,7 @@ def get_model(method, backbone=None, descriptors_dimension=None):
         cricavpr = torch.hub.load("Lu-Feng/CricaVPR", "trained_model")
         model = ResizingWrapper(cricavpr, resize_type=224)
     elif method == "megaloc":
-        model = torch.hub.load("gmberton/MegaLoc", "get_trained_model")
+        model = torch.hub.load("gmberton/MegaLoc", "get_trained_model", verbose=False)
 
     elif method == "boq":
         model = boq.get_boq(backbone=backbone, descriptors_dimension=descriptors_dimension)
