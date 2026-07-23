@@ -1,6 +1,7 @@
 import os
 import parser
 import shutil
+import time
 from pathlib import Path
 
 import faiss
@@ -10,6 +11,7 @@ import torch
 import torch.multiprocessing as mp
 import vpr_models
 import yaml
+from PIL import Image
 from rotation_functions import rotate_and_save_images
 from test_dataset import TestDataset
 from torch.utils.data import DataLoader
@@ -53,37 +55,96 @@ def build_test_dataset(yaml_data, args, rotation_angle):
     )
 
 
-def extract_descriptors_worker(rank, world_size, args, rotation_angle, yaml_data, all_descriptors):
+def images_share_resolution(dataset, indices) -> bool:
+    sizes = set()
+    for idx in indices:
+        with Image.open(dataset.images_paths[idx]) as img:
+            sizes.add(img.size)
+        if len(sizes) > 1:
+            return False
+    return True
+
+
+def estimate_batch_size(args, device, model, dataset, indices, safety_margin=0.7) -> int:
+    if not str(device).startswith("cuda") or len(indices) == 0:
+        return args.batch_size
+
+    if args.image_size is None and not images_share_resolution(dataset, indices):
+        return 1
+
+    sample_image, _ = dataset[indices[0]]
+
+    torch.cuda.reset_peak_memory_stats(device)
+    baseline_bytes = torch.cuda.memory_allocated(device)
+    with torch.inference_mode():
+        model(sample_image.unsqueeze(0).to(device))
+    torch.cuda.synchronize(device)
+    per_image_bytes = torch.cuda.max_memory_allocated(device) - baseline_bytes
+
+    if per_image_bytes <= 0:
+        return min(args.batch_size, len(indices))
+
+    free_bytes, _ = torch.cuda.mem_get_info(device)
+    extra_images = int((free_bytes * safety_margin) // per_image_bytes)
+
+    return max(1, min(1 + extra_images, len(indices)))
+
+
+def run_extraction_loop(model, device, dataloader, all_descriptors, desc):
+    data_time = 0.0
+    compute_time = 0.0
+    t0 = time.time()
+    for images, indices in tqdm(dataloader, desc=desc):
+        t1 = time.time()
+        data_time += t1 - t0
+        descriptors = model(images.to(device)).cpu()
+        all_descriptors[indices] = descriptors
+        t0 = time.time()
+        compute_time += t0 - t1
+    print(f"{SCRIPT_LABEL}    data_time = {data_time:.1f}s, compute_time = {compute_time:.1f}s")
+
+
+def extract_descriptors_worker(rank, world_size, args, rotations, yaml_data, all_descriptors_by_rotation):
     device = f"cuda:{rank}" if args.device == "cuda" else args.device
 
     model = vpr_models.get_model(args.method, args.backbone, args.descriptors_dimension)
     model = model.eval().to(device)
 
-    test_ds = build_test_dataset(yaml_data, args, rotation_angle)
+    for rotation_angle in rotations:
+        all_descriptors = all_descriptors_by_rotation[rotation_angle]
+        test_ds = build_test_dataset(yaml_data, args, rotation_angle)
 
-    database_shard = np.array_split(np.arange(test_ds.num_database), world_size)[rank].tolist()
-    queries_shard = np.array_split(
-        np.arange(test_ds.num_database, test_ds.num_database + test_ds.num_queries), world_size
-    )[rank].tolist()
+        database_shard = np.array_split(np.arange(test_ds.num_database), world_size)[rank].tolist()
+        queries_shard = np.array_split(
+            np.arange(test_ds.num_database, test_ds.num_database + test_ds.num_queries), world_size
+        )[rank].tolist()
 
-    with torch.inference_mode():
-        database_dataloader = DataLoader(
-            dataset=Subset(test_ds, database_shard), num_workers=args.num_workers, batch_size=args.batch_size
-        )
-        for images, indices in tqdm(
-            database_dataloader,
-            desc=f"{SCRIPT_LABEL}[gpu {rank}] Extracting database descriptors (rotation {rotation_angle} deg)",
-        ):
-            descriptors = model(images.to(device)).cpu()
-            all_descriptors[indices] = descriptors
+        with torch.inference_mode():
+            database_batch_size = estimate_batch_size(args, device, model, test_ds, database_shard)
+            print(f"{SCRIPT_LABEL}[gpu {rank}] database batch_size = {database_batch_size} ({len(database_shard)} images)")
+            database_dataloader = DataLoader(
+                dataset=Subset(test_ds, database_shard), num_workers=args.num_workers, batch_size=database_batch_size
+            )
+            run_extraction_loop(
+                model, device, database_dataloader, all_descriptors,
+                desc=f"{SCRIPT_LABEL}[gpu {rank}] Extracting database descriptors (rotation {rotation_angle} deg)",
+            )
 
-        queries_dataloader = DataLoader(dataset=Subset(test_ds, queries_shard), num_workers=args.num_workers, batch_size=1)
-        for images, indices in tqdm(
-            queries_dataloader,
-            desc=f"{SCRIPT_LABEL}[gpu {rank}] Extracting query descriptors (rotation {rotation_angle} deg)",
-        ):
-            descriptors = model(images.to(device)).cpu()
-            all_descriptors[indices] = descriptors
+            if str(device).startswith("cuda"):
+                torch.cuda.empty_cache()
+
+            queries_batch_size = estimate_batch_size(args, device, model, test_ds, queries_shard)
+            print(f"{SCRIPT_LABEL}[gpu {rank}] queries batch_size = {queries_batch_size} ({len(queries_shard)} images)")
+            queries_dataloader = DataLoader(
+                dataset=Subset(test_ds, queries_shard), num_workers=args.num_workers, batch_size=queries_batch_size
+            )
+            run_extraction_loop(
+                model, device, queries_dataloader, all_descriptors,
+                desc=f"{SCRIPT_LABEL}[gpu {rank}] Extracting query descriptors (rotation {rotation_angle} deg)",
+            )
+
+            if str(device).startswith("cuda"):
+                torch.cuda.empty_cache()
 
 
 def print_gpu_info(args, world_size):
@@ -98,57 +159,64 @@ def print_gpu_info(args, world_size):
         print(f"{SCRIPT_LABEL}    - cuda:{rank} {name} ({free_bytes / 1024**3:.1f} / {total_bytes / 1024**3:.1f} GB free)")
 
 
-def run_vpr(args, rotation_angle, yaml_data):
+def run_vpr(args, rotations, yaml_data):
     log_dir = Path(yaml_data["log_dir"])
     log_dir.mkdir(exist_ok=True, parents=True)
 
-    sizing_ds = build_test_dataset(yaml_data, args, rotation_angle)
+    # Rotation only changes the transform, not the dataset size, so any rotation is fine for sizing.
+    sizing_ds = build_test_dataset(yaml_data, args, rotations[0])
     num_database = sizing_ds.num_database
     total_images = len(sizing_ds)
     del sizing_ds
 
-    all_descriptors = torch.zeros((total_images, args.descriptors_dimension), dtype=torch.float32)
-    all_descriptors.share_memory_()
+    all_descriptors_by_rotation = {}
+    for rotation_angle in rotations:
+        t = torch.zeros((total_images, args.descriptors_dimension), dtype=torch.float32)
+        t.share_memory_()
+        all_descriptors_by_rotation[rotation_angle] = t
 
     world_size = resolve_world_size(args)
     print_gpu_info(args, world_size)
 
     if world_size == 1:
-        extract_descriptors_worker(0, 1, args, rotation_angle, yaml_data, all_descriptors)
+        extract_descriptors_worker(0, 1, args, rotations, yaml_data, all_descriptors_by_rotation)
     else:
         mp.spawn(
             extract_descriptors_worker,
-            args=(world_size, args, rotation_angle, yaml_data, all_descriptors),
+            args=(world_size, args, rotations, yaml_data, all_descriptors_by_rotation),
             nprocs=world_size,
             join=True,
         )
 
-    all_descriptors = all_descriptors.numpy()
-    queries_descriptors = all_descriptors[num_database:]
-    database_descriptors = all_descriptors[:num_database]
+    distance_matrices = {}
+    for rotation_angle in rotations:
+        all_descriptors = all_descriptors_by_rotation[rotation_angle].numpy()
+        queries_descriptors = all_descriptors[num_database:]
+        database_descriptors = all_descriptors[:num_database]
 
-    # Compute similarity matrix
-    distance_matrix = faiss.pairwise_distances(database_descriptors, queries_descriptors)
-    np.save(os.path.join(log_dir, f"D_{rotation_angle}.npy"), distance_matrix)  # saves binary numpy file
+        distance_matrix = faiss.pairwise_distances(database_descriptors, queries_descriptors)
+        np.save(os.path.join(log_dir, f"D_{rotation_angle}.npy"), distance_matrix)  # saves binary numpy file
+        distance_matrices[rotation_angle] = distance_matrix
 
-    if args.verbose:
-        import matplotlib.pyplot as plt
+        if args.verbose:
+            import matplotlib.pyplot as plt
 
-        plt.figure(figsize=(8, 6))
-        plt.imshow(distance_matrix, cmap="viridis", aspect="auto")
-        plt.colorbar(label="Distance")
-        plt.xlabel("Query Descriptors")
-        plt.ylabel("Database Descriptors")
-        plt.title("Pairwise Distance Matrix")
+            plt.figure(figsize=(8, 6))
+            plt.imshow(distance_matrix, cmap="viridis", aspect="auto")
+            plt.colorbar(label="Distance")
+            plt.xlabel("Query Descriptors")
+            plt.ylabel("Database Descriptors")
+            plt.title(f"Pairwise Distance Matrix (rotation {rotation_angle} deg)")
 
-        plt.show()
+            plt.show()
 
-    return distance_matrix
+    return distance_matrices
 
 if __name__ == "__main__":
+
     args = parser.parse_arguments()
     exp_yaml = args.exp_yaml
-    
+
     if os.path.exists(exp_yaml):
         with open(exp_yaml, "r") as stream:
             yaml_data = yaml.safe_load(stream)
@@ -165,12 +233,12 @@ if __name__ == "__main__":
     print(f"    - Queries:  {yaml_data['rgb_list_q']}")
     print(f"    - Log dir:  {yaml_data['log_dir']}")
 
-    D_0 = run_vpr(args, 0, yaml_data)
-    if args.rot_360:
-        D_90 = run_vpr(args, 90, yaml_data)
-        D_180 = run_vpr(args, 180, yaml_data)
-        D_270 = run_vpr(args, 270, yaml_data)
-        D = np.minimum.reduce([D_0, D_90, D_180, D_270])
-    else:
-        D = D_0
+    rotations = [0, 90, 180, 270] if args.rot_360 else [0]
+    start_time = time.time()
+    distance_matrices = run_vpr(args, rotations, yaml_data)
+    elapsed = time.time() - start_time
+
+    D = np.minimum.reduce([distance_matrices[r] for r in rotations])
     np.save(os.path.join(yaml_data["log_dir"], f"D.npy"), D)
+
+    print(f"{SCRIPT_LABEL}Total time: {elapsed:.2f}s")

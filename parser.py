@@ -62,6 +62,10 @@ def parse_arguments():
 
     parser.add_argument("--device", type=str, default="cuda", choices=["cuda", "cpu"], help="_")
     parser.add_argument(
+        "--gpu", type=int, default=None,
+        help="max number of GPUs to use for descriptor extraction; defaults to all visible GPUs"
+    )
+    parser.add_argument(
         "--recall_values",
         type=int,
         nargs="+",
