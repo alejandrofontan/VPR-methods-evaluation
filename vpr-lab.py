@@ -7,6 +7,7 @@ import faiss
 import numpy as np
 import pandas as pd
 import torch
+import torch.multiprocessing as mp
 import vpr_models
 import yaml
 from rotation_functions import rotate_and_save_images
@@ -18,19 +19,23 @@ from tqdm import tqdm
 SCRIPT_LABEL = f"\033[95m[{os.path.basename(__file__)}]\033[0m "
 
 
-def run_vpr(args, rotation_angle, yaml_data):
+def resolve_world_size(args) -> int:
+    if args.device != "cuda":
+        return 1
+    available = torch.cuda.device_count()
+    if available == 0:
+        return 1
+    if args.gpu is None:
+        return available
+    return min(args.gpu, available)
 
-    model = vpr_models.get_model(args.method, args.backbone, args.descriptors_dimension)
-    model = model.eval().to(args.device)
 
+def build_test_dataset(yaml_data, args, rotation_angle):
     database_rgb_csv_path = Path(yaml_data["rgb_list_db"])
     queries_rgb_csv_path = Path(yaml_data["rgb_list_q"])
 
     database_root = database_rgb_csv_path.parent
     query_root = queries_rgb_csv_path.parent
-
-    log_dir = Path(yaml_data["log_dir"])
-    log_dir.mkdir(exist_ok=True, parents=True)
 
     db_database_paths_raw = pd.read_csv(database_rgb_csv_path)["path_rgb_0"]
     db_queries_paths_raw = pd.read_csv(queries_rgb_csv_path)["path_rgb_0"]
@@ -38,7 +43,7 @@ def run_vpr(args, rotation_angle, yaml_data):
     database_image_list = [f"{database_root / p}" for p in db_database_paths_raw]
     queries_image_list = [f"{query_root / p}" for p in db_queries_paths_raw]
 
-    test_ds = TestDataset(
+    return TestDataset(
         database_image_list=database_image_list,
         queries_image_list=queries_image_list,
         rotation=rotation_angle,
@@ -47,28 +52,80 @@ def run_vpr(args, rotation_angle, yaml_data):
         use_labels=args.use_labels,
     )
 
+
+def extract_descriptors_worker(rank, world_size, args, rotation_angle, yaml_data, all_descriptors):
+    device = f"cuda:{rank}" if args.device == "cuda" else args.device
+
+    model = vpr_models.get_model(args.method, args.backbone, args.descriptors_dimension)
+    model = model.eval().to(device)
+
+    test_ds = build_test_dataset(yaml_data, args, rotation_angle)
+
+    database_shard = np.array_split(np.arange(test_ds.num_database), world_size)[rank].tolist()
+    queries_shard = np.array_split(
+        np.arange(test_ds.num_database, test_ds.num_database + test_ds.num_queries), world_size
+    )[rank].tolist()
+
     with torch.inference_mode():
-        database_subset_ds = Subset(test_ds, list(range(test_ds.num_database)))
         database_dataloader = DataLoader(
-            dataset=database_subset_ds, num_workers=args.num_workers, batch_size=args.batch_size
+            dataset=Subset(test_ds, database_shard), num_workers=args.num_workers, batch_size=args.batch_size
         )
-        all_descriptors = np.empty((len(test_ds), args.descriptors_dimension), dtype="float32")
-        for images, indices in tqdm(database_dataloader, desc=f"{SCRIPT_LABEL}Extracting database descriptors (rotation {rotation_angle} deg)"):
-            descriptors = model(images.to(args.device))
-            descriptors = descriptors.cpu().numpy()
-            all_descriptors[indices.numpy(), :] = descriptors
+        for images, indices in tqdm(
+            database_dataloader,
+            desc=f"{SCRIPT_LABEL}[gpu {rank}] Extracting database descriptors (rotation {rotation_angle} deg)",
+        ):
+            descriptors = model(images.to(device)).cpu()
+            all_descriptors[indices] = descriptors
 
-        queries_subset_ds = Subset(
-            test_ds, list(range(test_ds.num_database, test_ds.num_database + test_ds.num_queries))
+        queries_dataloader = DataLoader(dataset=Subset(test_ds, queries_shard), num_workers=args.num_workers, batch_size=1)
+        for images, indices in tqdm(
+            queries_dataloader,
+            desc=f"{SCRIPT_LABEL}[gpu {rank}] Extracting query descriptors (rotation {rotation_angle} deg)",
+        ):
+            descriptors = model(images.to(device)).cpu()
+            all_descriptors[indices] = descriptors
+
+
+def print_gpu_info(args, world_size):
+    if args.device != "cuda" or torch.cuda.device_count() == 0:
+        print(f"{SCRIPT_LABEL}Using CPU")
+        return
+
+    print(f"{SCRIPT_LABEL}Using {world_size} GPU(s):")
+    for rank in range(world_size):
+        name = torch.cuda.get_device_name(rank)
+        free_bytes, total_bytes = torch.cuda.mem_get_info(rank)
+        print(f"{SCRIPT_LABEL}    - cuda:{rank} {name} ({free_bytes / 1024**3:.1f} / {total_bytes / 1024**3:.1f} GB free)")
+
+
+def run_vpr(args, rotation_angle, yaml_data):
+    log_dir = Path(yaml_data["log_dir"])
+    log_dir.mkdir(exist_ok=True, parents=True)
+
+    sizing_ds = build_test_dataset(yaml_data, args, rotation_angle)
+    num_database = sizing_ds.num_database
+    total_images = len(sizing_ds)
+    del sizing_ds
+
+    all_descriptors = torch.zeros((total_images, args.descriptors_dimension), dtype=torch.float32)
+    all_descriptors.share_memory_()
+
+    world_size = resolve_world_size(args)
+    print_gpu_info(args, world_size)
+
+    if world_size == 1:
+        extract_descriptors_worker(0, 1, args, rotation_angle, yaml_data, all_descriptors)
+    else:
+        mp.spawn(
+            extract_descriptors_worker,
+            args=(world_size, args, rotation_angle, yaml_data, all_descriptors),
+            nprocs=world_size,
+            join=True,
         )
-        queries_dataloader = DataLoader(dataset=queries_subset_ds, num_workers=args.num_workers, batch_size=1)
-        for images, indices in tqdm(queries_dataloader, desc=f"{SCRIPT_LABEL}Extracting query descriptors (rotation {rotation_angle} deg)"):
-            descriptors = model(images.to(args.device))
-            descriptors = descriptors.cpu().numpy()
-            all_descriptors[indices.numpy(), :] = descriptors
 
-    queries_descriptors = all_descriptors[test_ds.num_database :]
-    database_descriptors = all_descriptors[: test_ds.num_database]
+    all_descriptors = all_descriptors.numpy()
+    queries_descriptors = all_descriptors[num_database:]
+    database_descriptors = all_descriptors[:num_database]
 
     # Compute similarity matrix
     distance_matrix = faiss.pairwise_distances(database_descriptors, queries_descriptors)
