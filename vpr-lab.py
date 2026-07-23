@@ -32,6 +32,16 @@ def resolve_world_size(args) -> int:
     return min(args.gpu, available)
 
 
+def resolve_num_workers(args, world_size) -> int:
+    try:
+        available_cpus = len(os.sched_getaffinity(0))
+    except AttributeError:
+        available_cpus = os.cpu_count() or 1
+
+    per_rank_cpus = max(1, available_cpus // world_size)
+    return max(1, min(args.num_workers, per_rank_cpus))
+
+
 def build_test_dataset(yaml_data, args, rotation_angle):
     database_rgb_csv_path = Path(yaml_data["rgb_list_db"])
     queries_rgb_csv_path = Path(yaml_data["rgb_list_q"])
@@ -110,6 +120,9 @@ def extract_descriptors_worker(rank, world_size, args, rotations, yaml_data, all
     model = vpr_models.get_model(args.method, args.backbone, args.descriptors_dimension)
     model = model.eval().to(device)
 
+    num_workers = resolve_num_workers(args, world_size)
+    print(f"{SCRIPT_LABEL}[gpu {rank}] num_workers = {num_workers}")
+
     for rotation_angle in rotations:
         all_descriptors = all_descriptors_by_rotation[rotation_angle]
         test_ds = build_test_dataset(yaml_data, args, rotation_angle)
@@ -123,7 +136,7 @@ def extract_descriptors_worker(rank, world_size, args, rotations, yaml_data, all
             database_batch_size = estimate_batch_size(args, device, model, test_ds, database_shard)
             print(f"{SCRIPT_LABEL}[gpu {rank}] database batch_size = {database_batch_size} ({len(database_shard)} images)")
             database_dataloader = DataLoader(
-                dataset=Subset(test_ds, database_shard), num_workers=args.num_workers, batch_size=database_batch_size
+                dataset=Subset(test_ds, database_shard), num_workers=num_workers, batch_size=database_batch_size
             )
             run_extraction_loop(
                 model, device, database_dataloader, all_descriptors,
@@ -136,7 +149,7 @@ def extract_descriptors_worker(rank, world_size, args, rotations, yaml_data, all
             queries_batch_size = estimate_batch_size(args, device, model, test_ds, queries_shard)
             print(f"{SCRIPT_LABEL}[gpu {rank}] queries batch_size = {queries_batch_size} ({len(queries_shard)} images)")
             queries_dataloader = DataLoader(
-                dataset=Subset(test_ds, queries_shard), num_workers=args.num_workers, batch_size=queries_batch_size
+                dataset=Subset(test_ds, queries_shard), num_workers=num_workers, batch_size=queries_batch_size
             )
             run_extraction_loop(
                 model, device, queries_dataloader, all_descriptors,
