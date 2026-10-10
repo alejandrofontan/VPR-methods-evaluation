@@ -1,0 +1,35 @@
+# VSLAM-LAB capability environment for the VPR distance matrix (<sequence>/vpr-lab/D.npy). VSLAM-LAB clones this repo
+# to Capabilities/sources/vpr; its `vpr` task runs Capabilities/vpr.py, which resolves dataset/sequence targets and runs
+# `inference --sequence-path ...` here (vslamlab_vpr.py -> vpr-lab.py). VPR-LAB (github.com/VSLAM-LAB/VPR-LAB) keeps
+# using this repo from its own environment for the research tools.
+[workspace]
+authors = ["vslamlab <vslamlab@gmail.com>"]
+channels = ["https://prefix.dev/conda-forge"]
+name = "vpr"
+platforms = [{ name = "linux-64-cuda129", platform = "linux-64", cuda = "12.9" }]
+version = "0.1.0"
+
+# TORCH_HOME / HF_HOME: torch.hub code and the weights it fetches (MegaLoc: from the Hugging Face hub) go to weights/
+[tasks]
+install = { cmd = "python vslamlab_vpr.py --prefetch", env = { TORCH_HOME = "$PIXI_PROJECT_ROOT/weights", HF_HOME = "$PIXI_PROJECT_ROOT/weights/hf" } }
+inference = { cmd = "python vslamlab_vpr.py", env = { TORCH_HOME = "$PIXI_PROJECT_ROOT/weights", HF_HOME = "$PIXI_PROJECT_ROOT/weights/hf" } }
+test = "python -c 'import faiss, torch, vpr_models; print(\"OK\", torch.cuda.is_available())' && python vslamlab_vpr.py --help > /dev/null && echo OK"
+
+[dependencies]
+python = "3.11.*"
+cuda-version = "12.9.*"  # same PyTorch build as the other CUDA 12.9 environments (shared pixi cache)
+pytorch-gpu = "2.7.*"
+torchvision = "*"
+faiss-cpu = "*"
+numpy = "*"
+pandas = "*"
+pillow = "*"
+opencv = "*"
+scikit-learn = "*"
+scipy = "*"
+pyyaml = "*"
+tqdm = "*"
+gdown = "*"
+loguru = "*"
+huggingface_hub = "*"  # MegaLoc hub weights
+safetensors = "*"

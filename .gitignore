@@ -3,3 +3,6 @@
 __pycache__
 logs/
 trained_models/
+weights/
+.pixi/*
+!.pixi/config.toml
